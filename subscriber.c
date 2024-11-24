@@ -3,9 +3,11 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #define BUFFER_SIZE 1024
 #define MAX_TOPICS 10
+#define MAX_CONNECTIONS 10
 
 typedef struct {
     char topic[50];
@@ -13,8 +15,16 @@ typedef struct {
     int port;
 } TopicBroker;
 
+typedef struct {
+    int sock;
+    char topic[50];
+} Connection;
+
 TopicBroker topic_brokers[MAX_TOPICS];
 int topic_count = 0;
+
+Connection connections[MAX_CONNECTIONS];
+int connection_count = 0;
 
 void add_topic_broker(const char *topic, const char *ip, int port) {
     if (topic_count >= MAX_TOPICS) {
@@ -35,7 +45,12 @@ int connect_to_broker(const char *topic) {
             broker_address.sin_family = AF_INET;
             broker_address.sin_port = htons(topic_brokers[i].port);
             inet_pton(AF_INET, topic_brokers[i].ip, &broker_address.sin_addr);
-            connect(sock, (struct sockaddr *)&broker_address, sizeof(broker_address));
+
+            if (connect(sock, (struct sockaddr *)&broker_address, sizeof(broker_address)) < 0) {
+                perror("[ERROR] Connection to broker failed");
+                return -1;
+            }
+
             return sock;
         }
     }
@@ -43,7 +58,31 @@ int connect_to_broker(const char *topic) {
     return -1;
 }
 
-void subscribe_to_topic() {
+void *listen_to_broker(void *arg) {
+    Connection *conn = (Connection *)arg;
+    char buffer[BUFFER_SIZE];
+
+    // printf("[DEBUG] Listening to messages for topic '%s'...\n", conn->topic);  
+
+    while (1) {
+        memset(buffer, 0, BUFFER_SIZE);
+        int bytes_received = recv(conn->sock, buffer, BUFFER_SIZE, 0);
+        if (bytes_received > 0) {
+            printf("Message received on topic '%s': %s\n", conn->topic, buffer);
+        } else if (bytes_received == 0) {
+            printf("[DEBUG] Broker closed connection for topic '%s'.\n", conn->topic);
+            break;
+        } else {
+            perror("[ERROR] recv failed");
+            break;
+        }
+    }
+
+    close(conn->sock);
+    pthread_exit(NULL);
+}
+
+void subscribe_to_topics() {
     char topic[BUFFER_SIZE];
 
     while (1) {
@@ -64,21 +103,20 @@ void subscribe_to_topic() {
 
         printf("[DEBUG] Subscribed to topic '%s'.\n", topic);
 
-        while (1) {
-            memset(buffer, 0, BUFFER_SIZE);
-            int bytes_received = recv(sock, buffer, BUFFER_SIZE, 0);
-            if (bytes_received > 0) {
-                printf("Message received: %s\n", buffer);
-            } else if (bytes_received == 0) {
-                printf("[DEBUG] Broker closed connection.\n");
-                break;
-            } else {
-                perror("[ERROR] recv failed");
-                break;
-            }
-        }
+        // Store connection
+        if (connection_count < MAX_CONNECTIONS) {
+            connections[connection_count].sock = sock;
+            strcpy(connections[connection_count].topic, topic);
 
-        close(sock);
+            pthread_t thread;
+            pthread_create(&thread, NULL, listen_to_broker, &connections[connection_count]);
+            pthread_detach(thread);
+
+            connection_count++;
+        } else {
+            printf("[ERROR] Maximum connections reached.\n");
+            close(sock);
+        }
     }
 }
 
@@ -95,6 +133,6 @@ int main(int argc, char *argv[]) {
         add_topic_broker(topic, ip, port);
     }
 
-    subscribe_to_topic();
+    subscribe_to_topics();
     return 0;
 }
